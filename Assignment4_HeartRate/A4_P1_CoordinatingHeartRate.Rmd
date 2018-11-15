@@ -1,0 +1,892 @@
+---
+title: "Assignment 4 - Coordinating Heart Rate"
+author: "Kiri Koppelgaard"
+date: "November 2, 2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup2, include = FALSE}
+setwd("~/Cognitive Science/3. Semester/Experimental Methods 3/Portfolio 3/Portfolio_3/Assignment4_HeartRate/data/CleanData")
+library(pacman)
+p_load(tidyverse, stringr, Metrics, caret, lme4, simr, lmerTest, stats, FinCal, PerformanceAnalytics, nonlinearTseries, GMCM, pROC, groupdata2, gridExtra, crqa)
+
+# installing/loading the package:
+if(!require(installr)) {
+install.packages("installr"); require(installr)} #load / install+load installr
+ 
+# using the package:
+updateR()
+```
+
+## Analysing Heart Rate and Respiration data
+
+The goal of this assignment is to first familiarize you with heart rate, and respiration data and their preprocessing. The second part explores how to analyze interpersonal coordination of these signals.
+
+These are the questions you need to be able to answer at the end of the assignment (aka that you need to submit as part of the portfolio)
+
+1) How do you preprocess heart rate and respiration data? Describe the process. If any data needs to be excluded, list the excluded data and motivate the exclusion.
+
+2) Do you observe interpersonal coordination in heart rate and respiration? Describe your control baseline, the method used to quantify coordination, and the statistical models used to infer whether coordination was higher than in the baseline. Report the results of the models.
+
+3) Do you observe differences in coordination between conditions? Report the models and results.
+
+4) Is respiration coordination a likely driver of heart rate coordination? Describe how you would test for it. Bonus points if you actually run the tests and report methods and results.
+
+N.B. Because of the timing, we're starting this exercise before collecting the data.
+Instead, you will develop your script this week on data from two years ago (Study1) and last year (Study2).
+When you hand in the assignment for feedback, you can use the old data. But when you hand in the final version for the exam, you need to adapt your script to use the data we collect next week in the lab.
+(For the old data): Note that synchronouns and turn-taking are the same task across both studies, but the third condition is different: two years ago it was self-paced joint reading; last year it was tv-series conversation.
+
+NB: For this exercise, you will need to do something very similiar to what you've done before spread over several weeks. Ie parse data, look at the plots, decide on data cleaning, build a model, and finally evaluate and interpret the results of the models. Going back and copying the approach from previous exercises will likely be a great help.
+
+```{r loading data, include = FALSE}
+read_data <- function(filename) {
+#read data  
+  participant <- read.csv(filename, header = TRUE)
+#parse filename; study, diagnosis, subject, trial
+  name = str_match(filename,"Study(\\d+)_G(\\d+)_T(\\d+)_([:alpha:]+)")
+  clinical = as.data.frame(t(name[2:length(name)]))
+  names(clinical) = c("study","group","trial", "condition")
+#downsampling
+  data = participant %>%
+  group(n = 100, method = 'greedy') %>%
+  dplyr::summarise(
+  time = mean(time,na.rm=T),
+  HR1 = mean(HR1,na.rm=T),
+  HR2 = mean(HR2,na.rm=T),
+  Resp1 = mean(Resp1,na.rm=T),
+  Resp2 = mean(Resp2,na.rm=T))
+#combine all this data
+return(cbind(clinical, data))
+}
+
+# when you've created a function that works, you can
+#p_data = list.files() %>% map_df(read_data)
+
+#write.csv(p_data, file = "cleaned_data.csv")
+ 
+p_data <- read.csv("cleaned_data.csv")
+
+p_data<- p_data[-1]
+```
+
+
+## Step by step suggestions to solve the assignment
+
+### Exploring physiological signals
+
+- Choose one pair (one pair, three conditions)
+```{r exploring data, include = FALSE}
+pair1 <- filter(p_data, group == 1, study == 1, condition == "Synchronous")
+pair2 <- filter(p_data, group == 1, study == 1, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 1, study == 1, condition == "SelfPaced")
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("SelfPaced")
+
+grid.arrange(plot1,plot2,plot3)
+ 
+```
+
+
+```{r scaling, include = FALSE}
+
+p_data$Resp1=as.numeric(scale(p_data$Resp1))
+p_data$Resp2=as.numeric(scale(p_data$Resp2))
+p_data$HR1=as.numeric(scale(p_data$HR1))
+p_data$HR2=as.numeric(scale(p_data$HR2))
+```
+
+
+```{r removing outliers, include = FALSE}
+
+removeOuts <- function(ts,threshold){
+ts[ts > (mean(ts,na.rm=T) +
+(threshold*sd(ts,na.rm=T))) |
+ts < (mean(ts,na.rm=T)-(threshold*sd(ts,na.rm=T)))] = mean(ts,na.rm=T)
+return(ts)
+}
+
+threshold=1.5
+
+p_data$HR1=removeOuts(p_data$HR1,threshold)
+p_data$HR2=removeOuts(p_data$HR2,threshold)
+p_data$Resp1=removeOuts(p_data$Resp1,threshold)
+p_data$Resp2=removeOuts(p_data$Resp2,threshold)
+
+```
+
+
+```{r checking the processed data, include = FALSE}
+#checking how the plot looks now
+pair1 <- filter(p_data, group == 1, study == 1, condition == "Synchronous")
+pair2 <- filter(p_data, group == 1, study == 1, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 1, study == 1, condition == "SelfPaced")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("SelfPaced")
+
+grid.arrange(plot1,plot2,plot3)
+
+
+```
+
+- Load the logs
+- Produce a plot of the participants' respiration signal and a different one of the participants' HR signal (for inspecting whether the data is usable)
+  N.B: remember the slides: artifacts, downsampling, scaling.
+  N.B. The gridExtra::grid.arrange() function allows you to display the plots side by side. E.g. grid.arrange(plot1, plot2, plot3, ncol=3)
+- Can you eye-ball which condition if any displays more physiological coordination?
+  RESPONSE: TurnTaking on HR1 is the most synchronious
+  
+- Run crqa on heart rate and respiration data (find parameters, run crqa)
+```{r crqa, include = FALSE}
+p_data <- na.omit(p_data)
+
+# p_data$HR1<-ts(p_data$HR1)
+# p_data$HR2<-ts(p_data$HR2)
+# p_data$Resp1<-ts(p_data$Resp1)
+# p_data$Resp2<-ts(p_data$Resp2)
+
+
+pair1 <- filter(p_data, group == 1, study == 1, condition == "Synchronous")
+pair2 <- filter(p_data, group == 1, study == 1, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 1, study == 1, condition == "SelfPaced")
+
+#Finding the optimal parameters
+par = list(lgM = 50, steps = seq(1, 6, 1), radiusspan = 100, radiussample = 40, normalize = 0, rescale = 0, mindiagline = 2, minvertline = 2, tw = 0, whiteline =
+FALSE, recpt = FALSE, fnnpercent = 10, typeami = "mindip")
+
+
+ans = optimizeParam(pair3$HR1, pair3$HR2, par, min.rec = 3.5, max.rec = 4.5)
+
+ans
+
+#Choose a common value for delay, emb.dim and radius
+radius = 0.1741874
+delay = 0
+embdim = 20
+
+Results=crqa (pair1$HR1, pair1$HR2, delay=delay, embed=embdim, radius=radius,normalize=0,rescale=0,mindiagline = 2,minvertline = 2)
+
+#Representing the plot
+RP = Results$RP
+RP = matrix(as.numeric(RP), nrow = ncol(RP))
+cols = c("white","blue4")
+image(RP, xlab = "", ylab = "", col = cols)
+
+#explore the lags of coordination
+Profile=drpdfromts(pair1$HR1, pair1$HR2,datatype = 'continuous',ws=50,radius=radius)
+timecourse = round( seq(-5000,5000,100)/1000, digit = 1)
+maxlag = Profile$maxlag/1000
+profile = Profile$profile*100
+Prof=data.frame(profile)
+ggplot(Prof, aes(timecourse,profile))+geom_line()+ geom_vline(xintercept = timecourse[maxlag], colour='red')
+```
+
+```{r}
+
+for (i in p_data$group){
+pair1 <- filter(p_data, group == i, condition == "Synchronous")
+pair2 <- filter(p_data, group == i, condition == "TurnTaking")
+pair3 <- filter(p_data, group == i, condition == "SelfPaced")
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+ggsave("Plot.jpeg",height=9,width=12,dpi=72, plot = last_plot(), path = "plots/")
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+ggsave("Plot.jpeg",height=9,width=12,dpi=72, plot = last_plot(), path = "plots/")
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("SelfPaced")
+ggsave("Plot.jpeg",height=9,width=12,dpi=72, plot = last_plot(), path = "plots/")
+}
+```
+
+- Does this tell you more than just eyeballing the plots?
+
+### Systematically pre-process the data
+- Loop through all the files (either with a loop or with a function), check which files should be excluded, if any, and save the pre-processed time-series. Tip: plot and visually inspect the data to figure out which should be excluded.
+```{r excluding data, include = FALSE, eval=FALSE}
+# folder where you want the graphs to be saved:
+results <- "data/"  
+
+# folder where the data is saved:
+labor <- "data/"
+
+# create graphing function
+graph <- function(p_data, na.rm = TRUE, ...){
+  
+  # create list of counties in data to loop over 
+  pair_list <- unique(p_data$group)
+  study_list <- unique(p_data$study)
+  condition_list <- unique(p_data$condition)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(pair_list)) {
+    a <- study_list[i]
+    b <- condition_list[i]
+    # create plot for each county in df 
+    pair <- filter(p_data, group == i, study == a, condition == b)
+
+    plot <- ggplot(pair, aes(time) + 
+    geom_line(aes(y = HR1, colour = "HR1")) + 
+   geom_line(aes(y = HR2, colour = "HR2")))
+    # print plots to screen
+    print(plot)
+  }
+}
+
+# run graphing function on long df
+graph(p_data)
+
+
+###Study 1
+#Group 1
+pair1 <- filter(p_data, group == 1, study == 1, condition == "Synchronous")
+pair2 <- filter(p_data, group == 1, study == 1, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 1, study == 1, condition == "SelfPaced")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2 
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("SelfPaced")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+
+plot1 #exclude Resp1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+
+plot2 #exclude Resp1
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "Resp1")) + 
+  geom_line(aes(y = HR2, colour = "Resp2")) + ggtitle("SelfPaced")
+plot3
+
+#Group 2
+pair1 <- filter(p_data, group == 2, study == 1, condition == "Synchronous")
+pair2 <- filter(p_data, group == 2, study == 1, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 2, study == 1, condition == "SelfPaced")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2 
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("SelfPaced")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1 #exclude Resp2
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2#exclude resp2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "Resp1")) + 
+  geom_line(aes(y = HR2, colour = "Resp2")) + ggtitle("SelfPaced")
+plot3
+
+#Group 3
+pair1 <- filter(p_data, group == 3, study == 1, condition == "Synchronous")
+pair2 <- filter(p_data, group == 3, study == 1, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 3, study == 1, condition == "SelfPaced")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("SelfPaced")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "Resp1")) + 
+  geom_line(aes(y = HR2, colour = "Resp2")) + ggtitle("SelfPaced")
+plot3
+
+#Group 4
+pair1 <- filter(p_data, group == 4, study == 1, condition == "Synchronous")
+pair2 <- filter(p_data, group == 4, study == 1, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 4, study == 1, condition == "SelfPaced")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("SelfPaced")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "Resp1")) + 
+  geom_line(aes(y = HR2, colour = "Resp2")) + ggtitle("SelfPaced")
+plot3
+
+###Study 2
+#Group 5
+pair1 <- filter(p_data, group == 5, study == 2, condition == "Synchronous")
+pair2 <- filter(p_data, group == 5, study == 2, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 5, study == 2, condition == "Conversation")
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Conversation")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "Resp1")) + 
+  geom_line(aes(y = HR2, colour = "Resp2")) + ggtitle("Conversation")
+plot3
+
+#Group 6
+pair1 <- filter(p_data, group == 6, study == 2, condition == "Synchronous")
+pair2 <- filter(p_data, group == 6, study == 2, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 6, study == 2, condition == "Conversation")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Conversation")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Conversation")
+plot3
+
+#Group 7
+pair1 <- filter(p_data, group == 7, study == 2, condition == "Synchronous")
+pair2 <- filter(p_data, group == 7, study == 2, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 7, study == 2, condition == "Conversation")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Conversation")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Conversation")
+plot3
+
+#Group 8
+pair1 <- filter(p_data, group == 8, study == 2, condition == "Synchronous")
+pair2 <- filter(p_data, group == 8, study == 2, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 8, study == 2, condition == "Conversation")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Conversation")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Conversation")
+plot3
+
+#Group 9
+pair1 <- filter(p_data, group == 9, study == 2, condition == "Synchronous")
+pair2 <- filter(p_data, group == 9, study == 2, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 9, study == 2, condition == "Conversation")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Conversation")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Conversation")
+plot3
+
+#Group 10
+pair1 <- filter(p_data, group == 10, study == 2, condition == "Synchronous")
+pair2 <- filter(p_data, group == 10, study == 2, condition == "TurnTaking")
+pair3 <- filter(p_data, group == 10, study == 2, condition == "Conversation")
+
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = HR1, colour = "HR1")) + 
+  geom_line(aes(y = HR2, colour = "HR2")) + ggtitle("Conversation")
+plot3
+
+plot1 <- ggplot(pair1, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Synchronous")
+plot1
+
+plot2 <- ggplot(pair2, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("TurnTaking")
+plot2
+
+plot3 <- ggplot(pair3, aes(time)) + 
+  geom_line(aes(y = Resp1, colour = "Resp1")) + 
+  geom_line(aes(y = Resp2, colour = "Resp2")) + ggtitle("Conversation")
+plot3
+
+```
+
+```{r excluding data, include = FALSE}
+
+#excluding the data
+p_data <- subset(p_data, !(group==1 & condition == "Synchronous"))
+p_data <- subset(p_data, !(group==1 & condition == "TurnTaking"))
+p_data <- subset(p_data, !(group==2 & condition == "Synchronous"))
+p_data <- subset(p_data, !(group==2 & condition == "TurnTaking"))
+
+```
+
+```{r choosing optimal parameters, include = FALSE}
+
+#making an extra unique group and and condition
+newdata <- p_data %>%
+  mutate(group_condition = str_c(group, condition, sep = " "))
+
+#combinations = distinct(newdata, group_condition)
+
+#Heartrate
+par = list(lgM = 50, steps = seq(1, 6, 1), radiusspan = 100, radiussample = 40, normalize = 0, rescale = 0, mindiagline = 2, minvertline = 2, tw = 0, whiteline = FALSE, recpt = FALSE, fnnpercent = 10, typeami = "mindip")
+
+CRQA_find <- function(groupcondition){
+  print("start")
+  HR1 = filter(newdata, group_condition == groupcondition)
+  HR2 = filter(newdata, group_condition == groupcondition)
+  ans = rep(NA,3)
+  try(expr = ans <-  optimizeParam(HR1$HR1, HR2$HR2, par, min.rec = 2, max.rec = 5))
+  radius = ans[[1]]
+  emddim = ans[[2]]
+  delay = ans[[3]]
+  return(cbind(radius, emddim, delay))
+}
+
+group_condition_list <- unique(newdata$group_condition)
+
+hr_params = map_df(group_condition_list, CRQA_find)
+
+
+CRQA_find(group_condition_list)
+
+
+# FEJL:
+#   Error in if (bins != lastbins) { : missing value where TRUE/FALSE needed
+# In addition: There were 11 warnings (use warnings() to see them)
+#   ans
+# 1  NA
+# 2  NA
+# 3  NA
+
+
+#defining global parameters
+radius = ans$radius
+emddim = ans$emddim
+delay = ans$delay
+
+#Respiration
+Make a function
+
+Function on each of the pairs in whole respiration - take the median - use this for all respiration data
+
+
+function(Resp1, Resp2):
+
+
+ans = optimizeParam(pair3$HR1, pair3$HR2, par, min.rec = 3.5, max.rec = 4.5)
+ans
+
+radius = 1.15 #adjustses radius
+emddim = ans$emddim
+delay = ans$delay
+
+
+
+
+```
+
+- Run crqa on all the pre-processed time-series and save the output (don't forget to add columns with study, group, condition and trial). Tip: remember to first assess optimal parameters (dimensions, delay, radius) across all timeseries. Tip: it will often fail, just take whatever parameters you get, select optimal across timeseries parameters and run crqa on all timeseries with those. Tip: double check the rr. When I ran the loop, I got very low rr, so I adjusted the radius until the average of rr across all pairs was approx. 4%.
+
+```{r crqa loop, include = FALSE}
+#HEARTRATE
+pairs <- unique(newdata$group_condition)
+result_df <- NULL
+
+# Loop for HR - just using parameters from group 4 as a start condition selfpaced
+for (i in pairs){
+  currentpair = filter(newdata,group_condition==i)
+  Results=crqa(currentpair$HR1, currentpair$HR2, delay=delay, embed=emddim, radius=radius, normalize=0 ,rescale=0 , mindiagline = 2 ,minvertline = 2)
+  temp_df <- data_frame(group_trial = unique(currentpair$group_condition),study = unique(currentpair$study),group = unique(currentpair$group),trial = unique(currentpair$trial),condition = unique(currentpair$condition), RR = Results$RR, DET = Results$DET, NRLINE = Results$NRLINE, LMAX = Results$maxL, L = Results$L,ENTR = Results$ENTR, rENTR = Results$rENTR, LAM = Results$LAM, TT = Results$TT)
+  # study = currentpair$study,group = currentpair$group, trial = currentpair$trial, condition = currentpair$condition, 
+if (i == 1){
+    result_df <- temp_df
+  } else {
+    result_df <- rbind(result_df, temp_df)
+  }
+}
+
+mean(result_df$RR)
+result_real_HR <- result_df
+
+#RESPIRATION
+result_df <- NULL
+
+# Loop for HR - just using parameters from group 4 as a start incondition selfpaced
+for (i in pairs){
+  currentpair = filter(newdata,group_condition==i)
+  Results=crqa(currentpair$Resp1, currentpair$Resp2, delay=delay, embed=emddim, radius=radius, normalize=0 ,rescale=0 , mindiagline = 2 ,minvertline = 2)
+  temp_df <- data_frame(group_trial = unique(currentpair$group_condition),study = unique(currentpair$study),group = unique(currentpair$group),trial = unique(currentpair$trial),condition = unique(currentpair$condition), RR = Results$RR, DET = Results$DET, NRLINE = Results$NRLINE, LMAX = Results$maxL, L = Results$L,ENTR = Results$ENTR, rENTR = Results$rENTR, LAM = Results$LAM, TT = Results$TT)
+  # study = currentpair$study,group = currentpair$group, trial = currentpair$trial, condition = currentpair$condition, 
+if (i == 1){
+    result_df <- temp_df
+  } else {
+    result_df <- rbind(result_df, temp_df)
+  }
+}
+
+mean(result_df$RR)
+
+result_real_Resp <- result_df
+```
+
+
+### Creating controls: shuffled controls
+ - loop through all pairs and conditions
+ - shuffle the timeseries (take a timeseries and rearrange its values in a random order). Tip check the sample() function
+ - run crqa and save the output. NB. which delay, embed, radius parameters should you use?
+ - statistically compare the crqa indexes in real and shuffled pairs
+
+```{r}
+#HEARTRATE
+result_df <- NULL
+
+for (i in pairs){
+  currentpair = filter(newdata,group_condition==i)
+  Results=crqa(sample(currentpair$HR1), sample(currentpair$HR2), delay=delay, embed=emddim, radius=radius, normalize=0 ,rescale=0 , mindiagline = 2 ,minvertline = 2)
+  temp_df <- data_frame(group_trial = unique(currentpair$group_condition),study = unique(currentpair$study),group = unique(currentpair$group),trial = unique(currentpair$trial),condition = unique(currentpair$condition), RR = Results$RR, DET = Results$DET, NRLINE = Results$NRLINE, LMAX = Results$maxL, L = Results$L,ENTR = Results$ENTR, rENTR = Results$rENTR, LAM = Results$LAM, TT = Results$TT)
+  # study = currentpair$study,group = currentpair$group, trial = currentpair$trial, condition = currentpair$condition, 
+if (i == 1){
+    result_df <- temp_df
+  } else {
+    result_df <- rbind(result_df, temp_df)
+  }
+}
+result_shuffled_HR <- result_df
+mean(result_df$RR)
+
+#RESPIRATION
+result_df <- NULL
+
+for (i in pairs){
+  currentpair = filter(newdata,group_condition==i)
+  Results=crqa(sample(currentpair$Resp1), sample(currentpair$Resp2), delay=delay, embed=emddim, radius=radius, normalize=0 ,rescale=0 , mindiagline = 2 ,minvertline = 2)
+  temp_df <- data_frame(group_trial = unique(currentpair$group_condition),study = unique(currentpair$study),group = unique(currentpair$group),trial = unique(currentpair$trial),condition = unique(currentpair$condition), RR = Results$RR, DET = Results$DET, NRLINE = Results$NRLINE, LMAX = Results$maxL, L = Results$L,ENTR = Results$ENTR, rENTR = Results$rENTR, LAM = Results$LAM, TT = Results$TT)
+  # study = currentpair$study,group = currentpair$group, trial = currentpair$trial, condition = currentpair$condition, 
+if (i == 1){
+    result_df <- temp_df
+  } else {
+    result_df <- rbind(result_df, temp_df)
+  }
+}
+
+mean(result_df$RR)
+
+result_shuffled_Resp <- result_df
+
+```
+
+ 
+### TRICKY! Creating controls: surrogate pair controls
+ - Per each real pair, identify at least one surrogate pair (matching one of the participants, with somebody doing the same task, but in a different pair). Tip: Malte will share a method to do this on screen.
+ - Run crqa on all the surrogate pairs and save the output. NB. which delay, embed, radius parameters should you use?
+ - Test whether crqa shows a difference between real and surrogate pairs
+ 
+ 
+```{r}
+#transforming to long format
+data_long <- gather(newdata, InterlocutorResp, Resp_measurement, Resp1:Resp2, factor_key=TRUE)
+data_long <- gather(data_long, InterlocutorHR, HR_measurement, HR1:HR2, factor_key=TRUE)
+
+#Finding combinations
+
+#making an extra unique group and and condition
+data_long <- data_long %>%
+  mutate(group_HR = str_c(group, InterlocutorHR, sep = " "))
+
+data_long <- data_long %>%
+  mutate(group_Resp = str_c(group, InterlocutorResp, sep = " "))
+
+#split data into conditions
+data_long_S <- filter(data_long, condition =="Synchronous")
+data_long_TT <- filter(data_long, condition == "TurnTaking")
+data_long_SC <- filter(data_long, condition == "SelfPaced"|condition =="Conversation")
+
+#create combinations HR
+participants <- as.vector(unique(data_long_S$group_HR))
+combinations_HR_S = expand.grid(p1 = participants, p2 = participants) %>% filter(p1 != p2)
+combinations_HR_S
+
+participants <- as.vector(unique(data_long_TT$group_HR))
+combinations_HR_TT = expand.grid(p1 = participants, p2 = participants) %>% filter(p1 != p2)
+combinations_HR_TT
+
+participants <- as.vector(unique(data_long_SC$group_HR))
+combinations_HR_SC = expand.grid(p1 = participants, p2 = participants) %>% filter(p1 != p2)
+combinations_HR_SC
+
+#create combinations Resp
+participants <- as.vector(unique(data_long_S$group_Resp))
+combinations_Resp_S = expand.grid(p1 = participants, p2 = participants) %>% filter(p1 != p2)
+combinations_Resp_S
+
+participants <- as.vector(unique(data_long_TT$group_Resp))
+combinations_Resp_TT = expand.grid(p1 = participants, p2 = participants) %>% filter(p1 != p2)
+combinations_Resp_TT
+
+participants <- as.vector(unique(data_long_SC$group_Resp))
+combinations_Resp_SC = expand.grid(p1 = participants, p2 = participants) %>% filter(p1 != p2)
+combinations_Resp_SC
+
+#looping through combinations per condition
+#RESPIRATION in condition synchrounous
+result_df <- NULL
+
+for (i in combinations_Resp_SC){
+  #find the data from each partictpant in pair
+  firstparticipant = str_extract(i, "(\\d+) Resp(\\d+)")
+  secondparticipant = 'i'-(str_extract(i, "(\\d+) Resp(\\d+)"))
+   
+  if (unique(data_long_SC$group_Resp) %% in i)):
+    firstparticipant ==
+  
+    
+    
+    
+    filter(data_long_S,combinations_Resp_SC==i)
+  secondparticipant
+  #put data from each participant into results function
+  Results=crqa(sample(currentpair$Resp1), sample(currentpair$Resp2), delay=delay, embed=emddim, radius=radius, normalize=0 ,rescale=0 , mindiagline = 2 ,minvertline = 2)
+  temp_df <- data_frame(group_trial = unique(currentpair$group_condition),study = unique(currentpair$study),group = unique(currentpair$group),trial = unique(currentpair$trial),condition = unique(currentpair$condition), RR = Results$RR, DET = Results$DET, NRLINE = Results$NRLINE, LMAX = Results$maxL, L = Results$L,ENTR = Results$ENTR, rENTR = Results$rENTR, LAM = Results$LAM, TT = Results$TT)
+  # study = currentpair$study,group = currentpair$group, trial = currentpair$trial, condition = currentpair$condition, 
+if (i == 1){
+    result_df <- temp_df
+  } else {
+    result_df <- rbind(result_df, temp_df)
+  }
+}
+
+
+```
+
+
+### Testing effects of conditions
+ - make a (probably underpowered) mixed model testing effects of the different conditions on heart rate and respiration coordination
+ - N.B: would it make sense to include surrogate pairs? and if so how? what would that tell you?
+
+### Effects of respiration coordination on heart rate coordination
+ - describe how you would test those.
+ - Optional: run the models and report them
